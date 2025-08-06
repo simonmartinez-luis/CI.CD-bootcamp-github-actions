@@ -1,0 +1,104 @@
+name: Deploy
+
+on: push
+
+jobs:
+  build:
+    # Ejecuta este job en varios SO y versiones de Node
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [18, 20]
+
+    steps:
+      # ⚠️ Evita imprimir secretos en los logs. Esto es solo para debug controlado.
+      - name: Print variable (solo para pruebas, eliminar en producción)
+        run: echo "${{ secrets.TOKEN_SECRET }}"
+
+      # Clona el repositorio
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Configura Node.js según la matrix
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # Instala dependencias
+      - name: Instalar dependencias
+        run: npm install
+
+      # Corre pruebas
+      - name: Run test
+        run: npm run test
+      
+      # Compila la página
+      - name: Build page
+        run: npm run build
+  
+      # Sube artefacto solo en Ubuntu + Node 18 para no duplicar
+      - name: Upload artifact
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node == 18 }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public/
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment-pages.outputs.page_url }}
+
+    # 📌 Exportamos la URL del sitio para usarla en el job notify
+    outputs:
+      page_url: ${{ steps.deployment-pages.outputs.page_url }}
+
+    steps:
+      - name: Deploy
+        id: deployment-pages
+        uses: actions/deploy-pages@v4
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always() # ✅ Corre siempre, incluso si falla el deploy
+
+    steps:
+      # Paso previo para definir color según estado
+      - name: Set Slack color
+        id: slackcolor
+        run: |
+          if [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "color=good" >> $GITHUB_OUTPUT
+          else
+            echo "color=danger" >> $GITHUB_OUTPUT
+          fi
+
+      # Enviar notificación a Slack
+      - name: Notify to Slack
+        uses: 8398a7/action-slack@v3
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK }} # ⚠️ Guardar este webhook en GitHub Secrets
+        with:
+          status: ${{ job.status }}
+          fields: repo,commit,author,job,took
+          custom_payload: |
+            {
+              "attachments": [
+                {
+                  "color": "${{ steps.slackcolor.outputs.color }}",
+                  "title": ":rocket: Deploy a GitHub Pages",
+                  "text": "*Estado:* `${{ job.status }}`\n*Repositorio:* ${{ github.repository }}\n*Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\n*Autor:* ${{ github.actor }}\n*Duración:* ${{ job.took }}s\n*Página:* <${{ needs.deploy.outputs.page_url }}|Ver sitio desplegado>",
+                  "mrkdwn_in": ["text", "pretext"]
+                }
+              ]
+            }
